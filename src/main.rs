@@ -2,13 +2,18 @@ use std::{
     env,
     error::Error,
     fs::File,
-    io::Read,
+    io::BufReader,
     str,
 };
 
 use zip::ZipArchive;
 
 use encoding_rs_io::DecodeReaderBytes;
+
+use quick_xml::{
+    events::Event,
+    Reader,
+};
 
 const BUF_SIZE: usize = 4096; // 4kb at once
 
@@ -23,16 +28,29 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let xmlfile = zip.by_index(0)?;
     println!("file is {}, size {} bytes", xmlfile.name(), xmlfile.size());
-    let mut xmlfile = DecodeReaderBytes::new(xmlfile);
+    let xmlfile = BufReader::new(DecodeReaderBytes::new(xmlfile));
+    let mut xmlfile = Reader::from_reader(xmlfile);
 
-    let mut buf = [0u8; BUF_SIZE];
+    let mut buf = Vec::with_capacity(BUF_SIZE);
     loop {
-        if xmlfile.read(&mut buf[..])? == 0 {
-            break;
-        }
+        match xmlfile.read_event(&mut buf)? {
+            Event::Start(e) => {
+                println!("start {}", str::from_utf8(e.local_name())?);
+            },
 
-        println!("read chunk: {}", str::from_utf8(&buf[..])?);
-        break;
+            Event::End(e) => {
+                println!("end {}", str::from_utf8(e.local_name())?);
+            },
+
+            Event::Text(e) => {
+                println!("text: {}", str::from_utf8(&e.unescaped()?)?);
+            },
+
+            Event::Eof => break,
+
+            _ => { },
+        };
+        buf.clear();
     }
 
     Ok(())
