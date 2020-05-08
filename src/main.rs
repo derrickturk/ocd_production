@@ -4,6 +4,7 @@ use std::{
     error::Error,
     fs::File,
     io::BufReader,
+    mem,
     str,
 };
 
@@ -25,6 +26,20 @@ struct WellAPI {
     pub well: u32,
 }
 
+impl WellAPI {
+    pub fn new() -> Self {
+        WellAPI {
+            state: 0,
+            county: 0,
+            well: 0,
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.state == 0 && self.county == 0 && self.well == 0
+    }
+}
+
 #[derive(Copy, Clone, Debug)]
 enum Phase {
     Oil,
@@ -40,13 +55,24 @@ struct WellProduction {
     pub water: Vec<f64>,
 }
 
+impl WellProduction {
+    pub fn new() -> Self {
+        WellProduction {
+            oil: Vec::new(),
+            gas: Vec::new(),
+            water: Vec::new(),
+        }
+    }
+}
+
 #[derive(Copy, Clone, Debug)]
 enum ParserState {
     Between,
-    Production,
+    ProductionNeedAPI,
     ReadAPIState,
     ReadAPICounty,
     ReadAPIWell,
+    ProductionHaveAPI,
     ReadPhase,
     ReadVolume,
 }
@@ -55,6 +81,7 @@ struct WellProductionParser {
     state: ParserState,
     phase: Phase,
     production: HashMap<WellAPI, WellProduction>,
+    last_api: WellAPI,
     current_api: WellAPI,
     current_record: WellProduction,
 }
@@ -65,12 +92,9 @@ impl WellProductionParser {
             state: ParserState::Between,
             phase: Phase::Oil,
             production: HashMap::new(),
-            current_api: WellAPI { state: 0, county: 0, well: 0 },
-            current_record: WellProduction {
-                oil: Vec::new(),
-                gas: Vec::new(),
-                water: Vec::new(),
-            },
+            last_api: WellAPI::new(),
+            current_api: WellAPI::new(),
+            current_record: WellProduction::new(),
         }
     }
 
@@ -84,26 +108,36 @@ impl WellProductionParser {
             ParserState::Between => {
                 match ev {
                     Event::Start(e) if e.local_name() == b"wcproduction" =>
-                        ParserState::Production,
+                        ParserState::ProductionNeedAPI,
                     _ => ParserState::Between,
                 }
             },
 
-            ParserState::Production => {
+            ParserState::ProductionNeedAPI => {
                 match ev {
                     Event::Start(e) => match e.local_name() {
                         b"api_st_cde" => ParserState::ReadAPIState,
                         b"api_cnty_cde" => ParserState::ReadAPICounty,
                         b"api_well_idn" => ParserState::ReadAPIWell,
+                        _ => ParserState::ProductionNeedAPI,
+                    },
+
+                    _ => ParserState::ProductionNeedAPI,
+                }
+            },
+
+            ParserState::ProductionHaveAPI => {
+                match ev {
+                    Event::Start(e) => match e.local_name() {
                         b"prd_knd_cde" => ParserState::ReadPhase,
                         b"prod_amt" => ParserState::ReadVolume,
-                        _ => ParserState::Production,
+                        _ => ParserState::ProductionHaveAPI,
                     },
 
                     Event::End(e) if e.local_name() == b"wcproduction" =>
                         ParserState::Between,
 
-                    _ => ParserState::Production,
+                    _ => ParserState::ProductionHaveAPI,
                 }
             },
 
@@ -117,7 +151,7 @@ impl WellProductionParser {
                     },
 
                     Event::End(e) if e.local_name() == b"api_st_cde" =>
-                        ParserState::Production,
+                        ParserState::ProductionNeedAPI,
 
                     _ => ParserState::ReadAPIState,
                 }
@@ -133,7 +167,7 @@ impl WellProductionParser {
                     },
 
                     Event::End(e) if e.local_name() == b"api_cnty_cde" =>
-                        ParserState::Production,
+                        ParserState::ProductionNeedAPI,
 
                     _ => ParserState::ReadAPICounty,
                 }
@@ -148,8 +182,10 @@ impl WellProductionParser {
                         ParserState::ReadAPIWell
                     },
 
-                    Event::End(e) if e.local_name() == b"api_well_idn" =>
-                        ParserState::Production,
+                    Event::End(e) if e.local_name() == b"api_well_idn" => {
+                        self.see_api();
+                        ParserState::ProductionHaveAPI
+                    },
 
                     _ => ParserState::ReadAPIWell,
                 }
@@ -158,17 +194,17 @@ impl WellProductionParser {
             ParserState::ReadPhase => {
                 match ev {
                     Event::Text(e) => {
-                        self.phase = match e.escaped() {
-                            b"O" => Phase::Oil,
-                            b"G" => Phase::Gas,
-                            b"W" => Phase::Water,
+                        self.phase = match e.escaped().first() {
+                            Some(b'O') => Phase::Oil,
+                            Some(b'G') => Phase::Gas,
+                            Some(b'W') => Phase::Water,
                             _ => Err("invalid phase")?,
                         };
                         ParserState::ReadPhase
                     },
 
                     Event::End(e) if e.local_name() == b"prd_knd_cde" =>
-                        ParserState::Production,
+                        ParserState::ProductionHaveAPI,
 
                     _ => ParserState::ReadPhase,
                 }
@@ -191,7 +227,7 @@ impl WellProductionParser {
                     },
 
                     Event::End(e) if e.local_name() == b"prod_amt" =>
-                        ParserState::Production,
+                        ParserState::ProductionHaveAPI,
 
                     _ => ParserState::ReadVolume,
                 }
@@ -199,6 +235,16 @@ impl WellProductionParser {
         };
 
         Ok(())
+    }
+
+    fn see_api(&mut self) {
+        if !self.last_api.is_empty() && self.current_api != self.last_api {
+            let mut record = WellProduction::new();
+            mem::swap(&mut record, &mut self.current_record);
+            self.production.insert(self.last_api, record);
+        }
+
+        self.last_api = self.current_api;
     }
 }
 
@@ -212,18 +258,23 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     let xmlfile = zip.by_index(0)?;
-    println!("file is {}, size {} bytes", xmlfile.name(), xmlfile.size());
     let xmlfile = BufReader::new(DecodeReaderBytes::new(xmlfile));
     let mut xmlfile = Reader::from_reader(xmlfile);
 
     let mut prodparser = WellProductionParser::new();
     let mut buf = Vec::with_capacity(BUF_SIZE);
+    let mut i = 0;
     loop {
         match xmlfile.read_event(&mut buf)? {
             Event::Eof => break,
             ev => prodparser.process(ev)?,
         };
         buf.clear();
+
+        i += 1;
+        if i > 25000 {
+            break;
+        }
     }
 
     let prod = prodparser.finish();
