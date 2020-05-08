@@ -2,8 +2,9 @@ use std::{
     collections::HashMap,
     env,
     error::Error,
+    fmt::{self, Display},
     fs::File,
-    io::BufReader,
+    io::{self, BufReader, Write},
     str,
 };
 
@@ -23,6 +24,12 @@ struct WellAPI {
     pub state: u8,
     pub county: u16,
     pub well: u32,
+}
+
+impl Display for WellAPI {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:02}{:03}{:05}", self.state, self.county, self.well)
+    }
 }
 
 impl WellAPI {
@@ -47,6 +54,12 @@ struct Date {
 impl Date {
     pub fn new() -> Self {
         Date { year: 0, month: 0 }
+    }
+}
+
+impl Display for Date {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:04}-{:02}", self.year, self.month)
     }
 }
 
@@ -295,6 +308,36 @@ impl<'a> WellProductionParser<'a> {
     }
 }
 
+fn write_table(w: &mut impl Write,
+  production: &HashMap<WellAPI, HashMap<Date, WellProduction>>
+  ) -> io::Result<()> {
+    write!(w, "api\tyear\tmonth\toil\tgas\twater\n")?;
+    for (api, by_date) in production {
+        for (date, vols) in by_date {
+            write!(w, "{}\t{}\t{}", api, date.year, date.month)?;
+
+            if let Some(oil) = vols.oil {
+                write!(w, "\t{}", oil)?;
+            } else {
+                write!(w, "\t")?;
+            }
+
+            if let Some(gas) = vols.gas {
+                write!(w, "\t{}", gas)?;
+            } else {
+                write!(w, "\t")?;
+            }
+
+            if let Some(water) = vols.water {
+                write!(w, "\t{}\n", water)?;
+            } else {
+                write!(w, "\t\n")?;
+            }
+        }
+    }
+    Ok(())
+}
+
 const EDDY_COUNTY: u16 = 15;
 
 fn main() -> Result<(), Box<dyn Error>> {
@@ -322,7 +365,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     let prod = prodparser.finish();
-    dbg!(prod);
+    write_table(&mut io::stdout(), &prod)?;
 
     Ok(())
 }
