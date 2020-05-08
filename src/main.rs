@@ -28,7 +28,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             break;
         }
 
-        println!("read chunk: {}", str::from_utf8(&buf[..])?);
+        println!("read chunk: {:?}", &buf[..]);
+        break;
     }
 
     Ok(())
