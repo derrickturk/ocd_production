@@ -4,7 +4,6 @@ use std::{
     error::Error,
     fs::File,
     io::BufReader,
-    mem,
     str,
 };
 
@@ -28,15 +27,7 @@ struct WellAPI {
 
 impl WellAPI {
     pub fn new() -> Self {
-        WellAPI {
-            state: 0,
-            county: 0,
-            well: 0,
-        }
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.state == 0 && self.county == 0 && self.well == 0
+        WellAPI { state: 0, county: 0, well: 0, }
     }
 }
 
@@ -47,21 +38,28 @@ enum Phase {
     Water,
 }
 
-// TODO: dates
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+struct Date {
+    year: u16,
+    month: u8,
+}
+
+impl Date {
+    pub fn new() -> Self {
+        Date { year: 0, month: 0 }
+    }
+}
+
 #[derive(Clone, Debug)]
 struct WellProduction {
-    pub oil: Vec<f64>,
-    pub gas: Vec<f64>,
-    pub water: Vec<f64>,
+    pub oil: Option<f64>,
+    pub gas: Option<f64>,
+    pub water: Option<f64>,
 }
 
 impl WellProduction {
     pub fn new() -> Self {
-        WellProduction {
-            oil: Vec::new(),
-            gas: Vec::new(),
-            water: Vec::new(),
-        }
+        WellProduction { oil: None, gas: None, water: None, }
     }
 }
 
@@ -73,6 +71,8 @@ enum ParserState {
     ReadAPICounty,
     ReadAPIWell,
     ProductionHaveAPI,
+    ReadMonth,
+    ReadYear,
     ReadPhase,
     ReadVolume,
 }
@@ -80,10 +80,9 @@ enum ParserState {
 struct WellProductionParser {
     state: ParserState,
     phase: Phase,
-    production: HashMap<WellAPI, WellProduction>,
-    last_api: WellAPI,
+    production: HashMap<WellAPI, HashMap<Date, WellProduction>>,
     current_api: WellAPI,
-    current_record: WellProduction,
+    current_date: Date,
 }
 
 impl WellProductionParser {
@@ -92,14 +91,12 @@ impl WellProductionParser {
             state: ParserState::Between,
             phase: Phase::Oil,
             production: HashMap::new(),
-            last_api: WellAPI::new(),
             current_api: WellAPI::new(),
-            current_record: WellProduction::new(),
+            current_date: Date::new(),
         }
     }
 
-    pub fn finish(mut self) -> HashMap<WellAPI, WellProduction> {
-        self.production.insert(self.current_api, self.current_record);
+    pub fn finish(self) -> HashMap<WellAPI, HashMap<Date, WellProduction>> {
         self.production
     }
 
@@ -129,6 +126,8 @@ impl WellProductionParser {
             ParserState::ProductionHaveAPI => {
                 match ev {
                     Event::Start(e) => match e.local_name() {
+                        b"prodn_mth" => ParserState::ReadMonth,
+                        b"prodn_yr" => ParserState::ReadYear,
                         b"prd_knd_cde" => ParserState::ReadPhase,
                         b"prod_amt" => ParserState::ReadVolume,
                         _ => ParserState::ProductionHaveAPI,
@@ -182,12 +181,42 @@ impl WellProductionParser {
                         ParserState::ReadAPIWell
                     },
 
-                    Event::End(e) if e.local_name() == b"api_well_idn" => {
-                        self.see_api();
-                        ParserState::ProductionHaveAPI
-                    },
+                    Event::End(e) if e.local_name() == b"api_well_idn" =>
+                        ParserState::ProductionHaveAPI,
 
                     _ => ParserState::ReadAPIWell,
+                }
+            },
+
+            ParserState::ReadMonth => {
+                match ev {
+                    Event::Text(e) => {
+                        self.current_date.month = str::parse(
+                            str::from_utf8(&e.unescaped()?)?
+                        )?;
+                        ParserState::ReadMonth
+                    },
+
+                    Event::End(e) if e.local_name() == b"prodn_mth" =>
+                        ParserState::ProductionHaveAPI,
+
+                    _ => ParserState::ReadMonth,
+                }
+            },
+
+            ParserState::ReadYear => {
+                match ev {
+                    Event::Text(e) => {
+                        self.current_date.year = str::parse(
+                            str::from_utf8(&e.unescaped()?)?
+                        )?;
+                        ParserState::ReadYear
+                    },
+
+                    Event::End(e) if e.local_name() == b"prodn_yr" =>
+                        ParserState::ProductionHaveAPI,
+
+                    _ => ParserState::ReadYear,
                 }
             },
 
@@ -217,10 +246,15 @@ impl WellProductionParser {
                             str::from_utf8(&e.unescaped()?)?
                         )?;
 
+                        let mut rec = self.production.entry(self.current_api)
+                            .or_insert_with(HashMap::new)
+                            .entry(self.current_date)
+                            .or_insert_with(WellProduction::new);
+
                         match self.phase {
-                            Phase::Oil => self.current_record.oil.push(vol),
-                            Phase::Gas => self.current_record.gas.push(vol),
-                            Phase::Water => self.current_record.water.push(vol),
+                            Phase::Oil => rec.oil = Some(vol),
+                            Phase::Gas => rec.gas = Some(vol),
+                            Phase::Water => rec.water = Some(vol),
                         };
 
                         ParserState::ReadVolume
@@ -235,16 +269,6 @@ impl WellProductionParser {
         };
 
         Ok(())
-    }
-
-    fn see_api(&mut self) {
-        if !self.last_api.is_empty() && self.current_api != self.last_api {
-            let mut record = WellProduction::new();
-            mem::swap(&mut record, &mut self.current_record);
-            self.production.insert(self.last_api, record);
-        }
-
-        self.last_api = self.current_api;
     }
 }
 
