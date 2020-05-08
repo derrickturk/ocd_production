@@ -79,7 +79,7 @@ impl WellProductionParser {
         self.production
     }
 
-    pub fn process(&mut self, ev: Event) {
+    pub fn process(&mut self, ev: Event) -> Result<(), Box<dyn Error>> {
         self.state = match self.state {
             ParserState::Between => {
                 match ev {
@@ -88,9 +88,117 @@ impl WellProductionParser {
                     _ => ParserState::Between,
                 }
             },
-            
-            st => st,
+
+            ParserState::Production => {
+                match ev {
+                    Event::Start(e) => match e.local_name() {
+                        b"api_st_cde" => ParserState::ReadAPIState,
+                        b"api_cnty_cde" => ParserState::ReadAPICounty,
+                        b"api_well_idn" => ParserState::ReadAPIWell,
+                        b"prd_knd_cde" => ParserState::ReadPhase,
+                        b"prod_amt" => ParserState::ReadVolume,
+                        _ => ParserState::Production,
+                    },
+
+                    Event::End(e) if e.local_name() == b"wcproduction" =>
+                        ParserState::Between,
+
+                    _ => ParserState::Production,
+                }
+            },
+
+            ParserState::ReadAPIState => {
+                match ev {
+                    Event::Text(e) => {
+                        self.current_api.state = str::parse(
+                            str::from_utf8(&e.unescaped()?)?
+                        )?;
+                        ParserState::ReadAPIState
+                    },
+
+                    Event::End(e) if e.local_name() == b"api_st_cde" =>
+                        ParserState::Production,
+
+                    _ => ParserState::ReadAPIState,
+                }
+            },
+
+            ParserState::ReadAPICounty => {
+                match ev {
+                    Event::Text(e) => {
+                        self.current_api.county = str::parse(
+                            str::from_utf8(&e.unescaped()?)?
+                        )?;
+                        ParserState::ReadAPICounty
+                    },
+
+                    Event::End(e) if e.local_name() == b"api_cnty_cde" =>
+                        ParserState::Production,
+
+                    _ => ParserState::ReadAPICounty,
+                }
+            },
+
+            ParserState::ReadAPIWell => {
+                match ev {
+                    Event::Text(e) => {
+                        self.current_api.well = str::parse(
+                            str::from_utf8(&e.unescaped()?)?
+                        )?;
+                        ParserState::ReadAPIWell
+                    },
+
+                    Event::End(e) if e.local_name() == b"api_well_idn" =>
+                        ParserState::Production,
+
+                    _ => ParserState::ReadAPIWell,
+                }
+            },
+
+            ParserState::ReadPhase => {
+                match ev {
+                    Event::Text(e) => {
+                        self.phase = match e.escaped() {
+                            b"O" => Phase::Oil,
+                            b"G" => Phase::Gas,
+                            b"W" => Phase::Water,
+                            _ => Err("invalid phase")?,
+                        };
+                        ParserState::ReadPhase
+                    },
+
+                    Event::End(e) if e.local_name() == b"prd_knd_cde" =>
+                        ParserState::Production,
+
+                    _ => ParserState::ReadPhase,
+                }
+            },
+
+            ParserState::ReadVolume => {
+                match ev {
+                    Event::Text(e) => {
+                        let vol = str::parse(
+                            str::from_utf8(&e.unescaped()?)?
+                        )?;
+
+                        match self.phase {
+                            Phase::Oil => self.current_record.oil.push(vol),
+                            Phase::Gas => self.current_record.gas.push(vol),
+                            Phase::Water => self.current_record.water.push(vol),
+                        };
+
+                        ParserState::ReadVolume
+                    },
+
+                    Event::End(e) if e.local_name() == b"prod_amt" =>
+                        ParserState::Production,
+
+                    _ => ParserState::ReadVolume,
+                }
+            },
         };
+
+        Ok(())
     }
 }
 
@@ -113,7 +221,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     loop {
         match xmlfile.read_event(&mut buf)? {
             Event::Eof => break,
-            ev => prodparser.process(ev),
+            ev => prodparser.process(ev)?,
         };
         buf.clear();
     }
