@@ -71,21 +71,23 @@ enum ParserState {
     ReadAPICounty,
     ReadAPIWell,
     ProductionHaveAPI,
+    ProductionSkip,
     ReadMonth,
     ReadYear,
     ReadPhase,
     ReadVolume,
 }
 
-struct WellProductionParser {
+struct WellProductionParser<'a> {
     state: ParserState,
     phase: Phase,
     production: HashMap<WellAPI, HashMap<Date, WellProduction>>,
     current_api: WellAPI,
     current_date: Date,
+    api_predicate: Option<&'a dyn Fn(WellAPI) -> bool>,
 }
 
-impl WellProductionParser {
+impl<'a> WellProductionParser<'a> {
     pub fn new() -> Self {
         WellProductionParser {
             state: ParserState::Between,
@@ -93,7 +95,14 @@ impl WellProductionParser {
             production: HashMap::new(),
             current_api: WellAPI::new(),
             current_date: Date::new(),
+            api_predicate: None,
         }
+    }
+
+    pub fn with_predicate(p: &'a dyn Fn(WellAPI) -> bool) -> Self {
+        let mut parser = WellProductionParser::new();
+        parser.api_predicate = Some(p);
+        parser
     }
 
     pub fn finish(self) -> HashMap<WellAPI, HashMap<Date, WellProduction>> {
@@ -140,6 +149,15 @@ impl WellProductionParser {
                 }
             },
 
+            ParserState::ProductionSkip => {
+                match ev {
+                    Event::End(e) if e.local_name() == b"wcproduction" =>
+                        ParserState::Between,
+
+                    _ => ParserState::ProductionSkip,
+                }
+            },
+
             ParserState::ReadAPIState => {
                 match ev {
                     Event::Text(e) => {
@@ -181,8 +199,13 @@ impl WellProductionParser {
                         ParserState::ReadAPIWell
                     },
 
-                    Event::End(e) if e.local_name() == b"api_well_idn" =>
-                        ParserState::ProductionHaveAPI,
+                    Event::End(e) if e.local_name() == b"api_well_idn" => {
+                        match self.api_predicate {
+                            Some(p) if !p(self.current_api) =>
+                                ParserState::ProductionSkip,
+                            _ => ParserState::ProductionHaveAPI,
+                        }
+                    }
 
                     _ => ParserState::ReadAPIWell,
                 }
@@ -272,6 +295,8 @@ impl WellProductionParser {
     }
 }
 
+const EDDY_COUNTY: u16 = 15;
+
 fn main() -> Result<(), Box<dyn Error>> {
     let path = env::args().nth(1).ok_or("no filename provided")?;
     let zipfile = File::open(path)?;
@@ -285,20 +310,15 @@ fn main() -> Result<(), Box<dyn Error>> {
     let xmlfile = BufReader::new(DecodeReaderBytes::new(xmlfile));
     let mut xmlfile = Reader::from_reader(xmlfile);
 
-    let mut prodparser = WellProductionParser::new();
+    let mut prodparser = WellProductionParser::with_predicate(
+        &|api: WellAPI| api.county == EDDY_COUNTY);
     let mut buf = Vec::with_capacity(BUF_SIZE);
-    let mut i = 0;
     loop {
         match xmlfile.read_event(&mut buf)? {
             Event::Eof => break,
             ev => prodparser.process(ev)?,
         };
         buf.clear();
-
-        i += 1;
-        if i > 25000 {
-            break;
-        }
     }
 
     let prod = prodparser.finish();
