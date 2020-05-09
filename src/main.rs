@@ -19,7 +19,7 @@ use quick_xml::{
 
 const BUF_SIZE: usize = 4096; // 4kb at once
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 struct WellAPI {
     pub state: u8,
     pub county: u16,
@@ -45,7 +45,7 @@ enum Phase {
     Water,
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 struct Date {
     year: u16,
     month: u8,
@@ -313,8 +313,11 @@ fn write_table(w: &mut impl Write,
   ) -> io::Result<()> {
     write!(w, "api\tyear\tmonth\toil\tgas\twater\n")?;
     for (api, by_date) in production {
-        for (date, vols) in by_date {
+        let mut dates: Vec<_> = by_date.keys().collect();
+        dates.sort();
+        for date in dates {
             write!(w, "{}\t{}\t{}", api, date.year, date.month)?;
+            let vols = &by_date[date];
 
             if let Some(oil) = vols.oil {
                 write!(w, "\t{}", oil)?;
